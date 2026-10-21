@@ -1,0 +1,6 @@
+# NetBeans and Java build output
+incident tracking/build/
+incident tracking/dist/
+incident tracking/nbproject/private/
+incident tracking/src/**/*.class
+
