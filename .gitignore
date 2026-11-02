@@ -4,3 +4,6 @@ incident tracking/dist/
 incident tracking/nbproject/private/
 incident tracking/src/**/*.class
 
+# Maven build output
+**/target/
+**/*.class
