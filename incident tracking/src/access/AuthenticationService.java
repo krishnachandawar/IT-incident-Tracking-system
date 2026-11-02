@@ -23,7 +23,7 @@ public final class AuthenticationService {
             String department,
             String designation,
             String requestedRole) throws SQLException {
-        String validUsername = requireText(username, "Username");
+        String validUsername = requireUsername(username);
         String validPassword = requirePassword(password);
         String validEmployeeId = requireText(employeeId, "Employee ID");
         String validDepartment = requireText(department, "Department");
@@ -70,7 +70,7 @@ public final class AuthenticationService {
     }
 
     public UserAccount authenticate(String username, String password) throws SQLException {
-        String validUsername = requireText(username, "Username");
+        String validUsername = requireUsername(username);
         String validPassword = requirePassword(password);
         String sql = "SELECT username, password_salt, password_hash, employee_id, "
                 + "department, designation, role, approval_status FROM app_users WHERE username = ?";
@@ -83,9 +83,17 @@ public final class AuthenticationService {
                         || !PasswordHasher.matches(
                                 validPassword,
                                 result.getString("password_salt"),
-                                result.getString("password_hash"))
-                        || !"APPROVED".equals(result.getString("approval_status"))) {
+                                result.getString("password_hash"))) {
                     return null;
+                }
+                String approvalStatus = result.getString("approval_status");
+                if (!"APPROVED".equals(approvalStatus)) {
+                    if ("PENDING".equals(approvalStatus)) {
+                        throw new IllegalStateException(
+                                "Your account is awaiting main manager approval.");
+                    }
+                    throw new IllegalStateException(
+                            "This account was not approved for login.");
                 }
 
                 return new UserAccount(
@@ -115,6 +123,15 @@ public final class AuthenticationService {
             throw new IllegalArgumentException(fieldName + " must not be empty.");
         }
         return trimmed;
+    }
+
+    private static String requireUsername(String value) {
+        String username = requireText(value, "Username");
+        if (!username.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IllegalArgumentException(
+                    "Username may contain only letters, numbers, dots, underscores, and hyphens.");
+        }
+        return username;
     }
 
     private static String requirePassword(String password) {

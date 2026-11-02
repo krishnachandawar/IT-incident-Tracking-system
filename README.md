@@ -49,7 +49,8 @@ The web page is generated and served by the Java application. There is no separa
 <summary><strong>Authentication and accounts</strong></summary>
 
 - Login, logout, and session detection.
-- Password hashing with a per-user salt.
+- Passwords are never stored as plaintext: the backend stores a random per-user salt
+  and a PBKDF2-HMAC-SHA256 hash (210,000 iterations, 256-bit output).
 - Public registration with validation for username, password, employee ID, department, and designation.
 - Registration choices for `USER`, `TECHNICIAN`, and `MANAGER`.
 - USER accounts are approved immediately.
@@ -57,6 +58,8 @@ The web page is generated and served by the Java application. There is no separa
 - The ADMIN account (the main manager) can approve or reject pending registrations.
 - Pending and rejected accounts cannot authenticate.
 - Duplicate username and employee ID detection.
+- Username validation allows only letters, numbers, dots, underscores, and hyphens,
+  preventing unsafe values from entering browser event attributes.
 
 </details>
 
@@ -444,7 +447,19 @@ That account is expected to remain blocked while its approval state is `PENDING`
 - Use TLS, a reverse proxy, secure cookies, and a production secret store for deployment.
 - Restrict MySQL access to the application host.
 - Review role permissions before exposing the application outside localhost.
+- Keep the approval dashboard protected: registration usernames are validated on the
+  backend and escaped before being placed in the HTML UI.
+- The approval table passes usernames through escaped HTML data attributes instead of
+  embedding untrusted values directly in JavaScript string literals.
 - Treat user-entered incident descriptions and audit data as potentially sensitive.
 - The supplied credentials and `useSSL=false` JDBC setting are for local development only.
+- Application credentials are stored in MySQL only as salted password hashes. Database
+  credentials are loaded from `.env` or `db.properties`; the root `.env` file is ignored
+  by Git and should remain private.
 
 ## Current project status
+
+The browser workflow has been smoke-tested against the live local server for database
+health, registration, login, incident creation, technician claim and update, manager
+resolution, close/reopen, ticket history, administrator views, authorization checks,
+and registration approval controls.

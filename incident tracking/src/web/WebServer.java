@@ -157,6 +157,10 @@ public final class WebServer {
             ok.put("success", true);
             ok.put("user", mapUser(account));
             sendJsonResponse(exchange, 200, ok);
+        } catch (IllegalStateException e) {
+            sendError(exchange, 403, e.getMessage());
+        } catch (IllegalArgumentException e) {
+            sendError(exchange, 400, e.getMessage());
         } catch (Exception e) {
             sendError(exchange, 500, e.getMessage());
         }
