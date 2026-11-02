@@ -90,7 +90,6 @@ public final class IncidentService {
         int rank = getDesignationRank(designation);
         return severity * 60 + rank * 40;
     }
-
     // -------------------------------------------------------------------------
     // Ticket creation
     // -------------------------------------------------------------------------
@@ -707,7 +706,8 @@ public final class IncidentService {
      * Returns all user accounts ordered by creation date descending.
      */
     public List<Map<String, Object>> adminGetAllUsers() throws SQLException {
-        String sql = "SELECT username, employee_id, department, designation, role, created_at "
+        String sql = "SELECT username, employee_id, department, designation, role, "
+                + "approval_status, approved_by, approved_at, created_at "
                 + "FROM app_users ORDER BY created_at DESC";
         try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER);
              Statement stmt = connection.createStatement();
@@ -720,11 +720,76 @@ public final class IncidentService {
                 row.put("department", rs.getString("department"));
                 row.put("designation", rs.getString("designation"));
                 row.put("role", rs.getString("role"));
+                row.put("approval_status", rs.getString("approval_status"));
+                row.put("approved_by", rs.getString("approved_by"));
+                row.put("approved_at", rs.getString("approved_at"));
                 row.put("created_at", rs.getString("created_at"));
                 list.add(row);
             }
             return list;
         }
+    }
+
+    public List<Map<String, Object>> adminGetPendingRegistrations() throws SQLException {
+                String sql = "SELECT username, employee_id, department, designation, role, "
+                        + "approval_status, created_at FROM app_users "
+                        + "WHERE approval_status = 'PENDING' ORDER BY created_at ASC";
+                try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER);
+                     Statement stmt = connection.createStatement();
+                     ResultSet rs = stmt.executeQuery(sql)) {
+                    List<Map<String, Object>> list = new ArrayList<>();
+                    while (rs.next()) {
+                        Map<String, Object> row = new HashMap<>();
+                        row.put("username", rs.getString("username"));
+                        row.put("employee_id", rs.getString("employee_id"));
+                        row.put("department", rs.getString("department"));
+                        row.put("designation", rs.getString("designation"));
+                        row.put("role", rs.getString("role"));
+                        row.put("approval_status", rs.getString("approval_status"));
+                        row.put("created_at", rs.getString("created_at"));
+                        list.add(row);
+                    }
+                    return list;
+                }
+            }
+
+    public void adminApproveRegistration(UserAccount admin, String username, boolean approve)
+            throws SQLException {
+                if (admin == null || admin.getRole() != Role.ADMIN) {
+                    throw new IllegalArgumentException("Only the main manager can approve registrations.");
+                }
+                if (username == null || username.trim().isEmpty()) {
+                    throw new IllegalArgumentException("Username must not be empty.");
+                }
+                String status = approve ? "APPROVED" : "REJECTED";
+                String updateSql = "UPDATE app_users SET approval_status = ?, approved_by = ?, "
+                        + "approved_at = CURRENT_TIMESTAMP WHERE username = ? AND approval_status = 'PENDING'";
+                String auditSql = "INSERT INTO admin_audit_log "
+                        + "(admin_username, action, target_username, details) VALUES (?, ?, ?, ?)";
+                try (Connection connection = DatabaseConnections.openRoleConnection(Role.ADMIN)) {
+                    boolean previousAutoCommit = connection.getAutoCommit();
+                    connection.setAutoCommit(false);
+                    try (PreparedStatement update = connection.prepareStatement(updateSql);
+                         PreparedStatement audit = connection.prepareStatement(auditSql)) {
+                        update.setString(1, status);
+                        update.setString(2, admin.getUsername());
+                        update.setString(3, username.trim());
+                        if (update.executeUpdate() != 1) {
+                            throw new IllegalArgumentException("Pending registration not found: " + username);
+                        }
+                        audit.setString(1, admin.getUsername());
+                        audit.setString(2, approve ? "APPROVE_REGISTRATION" : "REJECT_REGISTRATION");
+                        audit.setString(3, username.trim());
+                        audit.setString(4, "Registration " + status.toLowerCase(Locale.ROOT) + ".");
+                        audit.executeUpdate();
+                        connection.commit();
+                    } catch (SQLException | RuntimeException e) {
+                        connection.rollback();
+                        throw e;
+                    } finally {
+                        connection.setAutoCommit(previousAutoCommit);
+                    }
+                }
     }
 
     /**

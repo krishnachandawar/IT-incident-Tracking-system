@@ -36,6 +36,7 @@ public final class WebServer {
                 port = Integer.parseInt(args[0]);
             } catch (NumberFormatException ignored) {
             }
+
         }
         String envPort = System.getenv("PORT");
         if (envPort != null && !envPort.trim().isEmpty()) {
@@ -78,6 +79,8 @@ public final class WebServer {
             // Admin endpoints
             server.createContext("/api/admin/stats", this::handleAdminStats);
             server.createContext("/api/admin/users", this::handleAdminUsers);
+            server.createContext("/api/admin/registrations", this::handleAdminRegistrations);
+            server.createContext("/api/admin/registrations/decision", this::handleAdminRegistrationDecision);
             server.createContext("/api/admin/users/role", this::handleAdminSetRole);
             server.createContext("/api/admin/tickets/close", this::handleAdminCloseTicket);
             server.createContext("/api/admin/tickets/reopen", this::handleAdminReopenTicket);
@@ -173,9 +176,13 @@ public final class WebServer {
                     params.get("password"),
                     params.get("employee_id"),
                     params.get("department"),
-                    params.get("designation"));
+                    params.get("designation"),
+                    params.getOrDefault("requested_role", "USER"));
             Map<String, Object> ok = new HashMap<>();
             ok.put("success", true);
+            String requestedRole = params.getOrDefault("requested_role", "USER");
+            ok.put("approval_required", !"USER".equalsIgnoreCase(requestedRole));
+            ok.put("requested_role", requestedRole.toUpperCase());
             sendJsonResponse(exchange, 200, ok);
         } catch (IllegalArgumentException e) {
             sendError(exchange, 400, e.getMessage());
@@ -455,6 +462,43 @@ public final class WebServer {
         try {
             List<Map<String, Object>> users = incidentService.adminGetAllUsers();
             sendJsonResponse(exchange, 200, users);
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminRegistrations(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || account.getRole() != Role.ADMIN) {
+            sendError(exchange, 403, "Only the main manager can review registrations.");
+            return;
+        }
+        try {
+            sendJsonResponse(exchange, 200, incidentService.adminGetPendingRegistrations());
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminRegistrationDecision(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || account.getRole() != Role.ADMIN) {
+            sendError(exchange, 403, "Only the main manager can approve registrations.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
+            return;
+        }
+        Map<String, String> params = JsonUtil.parseSimpleJson(readRequestBody(exchange));
+        try {
+            incidentService.adminApproveRegistration(account, params.get("username"),
+                    "APPROVE".equalsIgnoreCase(params.get("decision")));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
+        } catch (IllegalArgumentException e) {
+            sendError(exchange, 400, e.getMessage());
         } catch (Exception e) {
             sendError(exchange, 500, e.getMessage());
         }

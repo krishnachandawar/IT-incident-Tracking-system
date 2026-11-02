@@ -6,6 +6,17 @@
 USE incident_tracking;
 
 -- ------------------------------------------------------------------------------
+-- 0. Add approval state for technician and manager registrations
+-- ------------------------------------------------------------------------------
+ALTER TABLE app_users
+    ADD COLUMN approval_status ENUM('PENDING','APPROVED','REJECTED')
+        NOT NULL DEFAULT 'APPROVED' AFTER role,
+    ADD COLUMN approved_by VARCHAR(64) NULL AFTER approval_status,
+    ADD COLUMN approved_at TIMESTAMP NULL AFTER approved_by;
+
+CREATE INDEX ix_app_users_approval ON app_users (approval_status, role);
+
+-- ------------------------------------------------------------------------------
 -- 1. Add ADMIN role to app_users (extend ENUM)
 -- ------------------------------------------------------------------------------
 ALTER TABLE app_users

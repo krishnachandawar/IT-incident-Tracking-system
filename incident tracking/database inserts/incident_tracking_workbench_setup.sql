@@ -28,9 +28,13 @@ CREATE TABLE IF NOT EXISTS app_users (
     department VARCHAR(120) NOT NULL,
     designation VARCHAR(120) NOT NULL,
     role ENUM('USER', 'TECHNICIAN', 'MANAGER', 'ADMIN') NOT NULL DEFAULT 'USER',
+    approval_status ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'APPROVED',
+    approved_by VARCHAR(64) NULL,
+    approved_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (username),
     UNIQUE KEY uq_app_users_employee_id (employee_id)
+    ,KEY ix_app_users_approval (approval_status, role)
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------------------------
