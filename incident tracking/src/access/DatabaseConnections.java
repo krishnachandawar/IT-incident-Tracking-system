@@ -70,7 +70,9 @@ public final class DatabaseConnections {
 
     public static Connection openRoleConnection(Role role) throws SQLException {
         Objects.requireNonNull(role, "role must not be null");
-        return openConnection(role.name());
+        // ADMIN uses the MANAGER-level connection (same DB privileges)
+        String accountType = (role == Role.ADMIN) ? "MANAGER" : role.name();
+        return openConnection(accountType);
     }
 
     public static Connection openDefaultConnection() throws SQLException {

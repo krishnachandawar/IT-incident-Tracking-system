@@ -7,3 +7,7 @@ incident tracking/src/**/*.class
 # Maven build output
 **/target/
 **/*.class
+
+# Local environment files
+.env
+.env.local

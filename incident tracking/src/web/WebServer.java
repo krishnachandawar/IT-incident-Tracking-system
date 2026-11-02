@@ -55,11 +55,15 @@ public final class WebServer {
             } catch (Exception e1) {
                 server = HttpServer.create(new InetSocketAddress(port), 0);
             }
+
+            // Auth endpoints
             server.createContext("/", this::handleRoot);
             server.createContext("/api/session", this::handleSession);
             server.createContext("/api/login", this::handleLogin);
             server.createContext("/api/register", this::handleRegister);
             server.createContext("/api/logout", this::handleLogout);
+
+            // Ticket endpoints (user/technician)
             server.createContext("/api/tickets", this::handleTickets);
             server.createContext("/api/tickets/create", this::handleCreateTicket);
             server.createContext("/api/tickets/claim", this::handleClaimTicket);
@@ -69,6 +73,15 @@ public final class WebServer {
             server.createContext("/api/activity", this::handleActivity);
             server.createContext("/api/technicians", this::handleTechnicians);
             server.createContext("/api/status", this::handleStatus);
+            server.createContext("/api/priority-score", this::handlePriorityScore);
+
+            // Admin endpoints
+            server.createContext("/api/admin/stats", this::handleAdminStats);
+            server.createContext("/api/admin/users", this::handleAdminUsers);
+            server.createContext("/api/admin/users/role", this::handleAdminSetRole);
+            server.createContext("/api/admin/tickets/close", this::handleAdminCloseTicket);
+            server.createContext("/api/admin/tickets/reopen", this::handleAdminReopenTicket);
+            server.createContext("/api/admin/tickets/all", this::handleAdminAllTickets);
 
             server.setExecutor(Executors.newCachedThreadPool());
             server.start();
@@ -87,6 +100,9 @@ public final class WebServer {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Root
+    // -------------------------------------------------------------------------
     private void handleRoot(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
@@ -96,6 +112,9 @@ public final class WebServer {
         sendResponse(exchange, 200, html, "text/html; charset=UTF-8");
     }
 
+    // -------------------------------------------------------------------------
+    // Auth
+    // -------------------------------------------------------------------------
     private void handleSession(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
         Map<String, Object> response = new HashMap<>();
@@ -174,31 +193,35 @@ public final class WebServer {
         sendJsonResponse(exchange, 200, ok);
     }
 
+    // -------------------------------------------------------------------------
+    // Tickets (User / Technician)
+    // -------------------------------------------------------------------------
     private void handleTickets(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
         if (account == null) {
-            sendError(exchange, 401, "Not logged in.");
+            sendError(exchange, 401, "Not authenticated.");
             return;
         }
-
-        Map<String, String> query = parseQueryParams(exchange.getRequestURI().getRawQuery());
-        String filter = query.getOrDefault("filter", "my");
-        String type = query.get("type");
-
         try {
-            List<Map<String, Object>> tickets;
-            if ("open".equalsIgnoreCase(filter)) {
-                tickets = incidentService.getOpenTickets(type);
-            } else if ("assigned".equalsIgnoreCase(filter)) {
-                tickets = incidentService.getAssignedTickets(account.getEmployeeId());
-            } else if ("unresolved".equalsIgnoreCase(filter)) {
-                tickets = incidentService.getUnresolvedTickets();
-            } else if ("all".equalsIgnoreCase(filter)) {
-                tickets = incidentService.getAllTickets();
+            Map<String, String> query = parseQueryParams(exchange.getRequestURI().getRawQuery());
+            List<Map<String, Object>> list;
+            if (account.getRole() == Role.USER) {
+                list = incidentService.getTicketsForUser(account.getUsername());
+            } else if (account.getRole() == Role.TECHNICIAN) {
+                String view = query.containsKey("view")
+                        ? query.get("view") : query.getOrDefault("filter", "assigned");
+                if ("open".equalsIgnoreCase(view)) {
+                    list = incidentService.getOpenTicketsForTechnician();
+                } else {
+                    list = incidentService.getAssignedTickets(account.getEmployeeId());
+                }
             } else {
-                tickets = incidentService.getTicketsForUser(account.getUsername());
+                String filter = query.getOrDefault("filter", "all");
+                list = "unresolved".equalsIgnoreCase(filter)
+                        ? incidentService.getUnresolvedTickets()
+                        : incidentService.getAllTickets();
             }
-            sendJsonResponse(exchange, 200, tickets);
+            sendJsonResponse(exchange, 200, list);
         } catch (Exception e) {
             sendError(exchange, 500, e.getMessage());
         }
@@ -207,18 +230,26 @@ public final class WebServer {
     private void handleCreateTicket(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
         if (account == null) {
-            sendError(exchange, 401, "Not logged in.");
+            sendError(exchange, 401, "Not authenticated.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
             return;
         }
         String body = readRequestBody(exchange);
         Map<String, String> params = JsonUtil.parseSimpleJson(body);
+
         try {
             String tokenId = incidentService.createTicket(
-                    account, params.get("issue_type"), params.get("description"));
-            Map<String, Object> res = new HashMap<>();
-            res.put("success", true);
-            res.put("token_id", tokenId);
-            sendJsonResponse(exchange, 200, res);
+                    account,
+                    params.get("issue_type"),
+                    params.get("description"),
+                    params.get("priority_override"));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            ok.put("token_id", tokenId);
+            sendJsonResponse(exchange, 200, ok);
         } catch (IllegalArgumentException e) {
             sendError(exchange, 400, e.getMessage());
         } catch (Exception e) {
@@ -229,17 +260,21 @@ public final class WebServer {
     private void handleClaimTicket(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
         if (account == null || account.getRole() != Role.TECHNICIAN) {
-            sendError(exchange, 403, "Technician access required.");
+            sendError(exchange, 403, "Only technicians can claim tickets.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
             return;
         }
         String body = readRequestBody(exchange);
         Map<String, String> params = JsonUtil.parseSimpleJson(body);
-        String tokenId = params.get("token_id");
+
         try {
-            incidentService.claimTicket(account, tokenId);
-            Map<String, Object> res = new HashMap<>();
-            res.put("success", true);
-            sendJsonResponse(exchange, 200, res);
+            incidentService.claimTicket(account, params.get("token_id"));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
         } catch (IllegalArgumentException e) {
             sendError(exchange, 400, e.getMessage());
         } catch (Exception e) {
@@ -250,34 +285,38 @@ public final class WebServer {
     private void handleUpdateTicket(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
         if (account == null) {
-            sendError(exchange, 401, "Not logged in.");
+            sendError(exchange, 401, "Not authenticated.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
             return;
         }
         String body = readRequestBody(exchange);
         Map<String, String> params = JsonUtil.parseSimpleJson(body);
-        String tokenId = params.get("token_id");
-        String status = params.get("status");
-        int minutes = 0;
-        try {
-            if (params.containsKey("estimated_minutes")) {
-                minutes = Integer.parseInt(params.get("estimated_minutes"));
-            }
-        } catch (NumberFormatException ignored) {
-        }
-        String note = params.get("note");
 
         try {
+            String tokenId = params.get("token_id");
+            String status = params.get("status");
+            int estimatedMinutes = 0;
+            try {
+                estimatedMinutes = Integer.parseInt(params.getOrDefault("estimated_minutes", "0"));
+            } catch (NumberFormatException ignored) {
+            }
+            String note = params.get("note");
+
             if (account.getRole() == Role.TECHNICIAN) {
-                incidentService.updateTicketAsTechnician(account, tokenId, status, minutes, note);
-            } else if (account.getRole() == Role.MANAGER) {
-                incidentService.updateTicketAsManager(account, tokenId, status, minutes, note);
+                incidentService.updateTicketAsTechnician(account, tokenId, status, estimatedMinutes, note);
+            } else if (account.getRole().isAdminOrManager()) {
+                incidentService.updateTicketAsManager(account, tokenId, status, estimatedMinutes, note);
             } else {
-                sendError(exchange, 403, "Staff privileges required to update status.");
+                sendError(exchange, 403, "Not authorized to update tickets.");
                 return;
             }
-            Map<String, Object> res = new HashMap<>();
-            res.put("success", true);
-            sendJsonResponse(exchange, 200, res);
+
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
         } catch (IllegalArgumentException e) {
             sendError(exchange, 400, e.getMessage());
         } catch (Exception e) {
@@ -287,22 +326,27 @@ public final class WebServer {
 
     private void handleReassignTicket(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
-        if (account == null || account.getRole() != Role.MANAGER) {
-            sendError(exchange, 403, "Manager privileges required to reassign tickets.");
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Only managers/admins can reassign tickets.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
             return;
         }
         String body = readRequestBody(exchange);
         Map<String, String> params = JsonUtil.parseSimpleJson(body);
-        String tokenId = params.get("token_id");
-        String techId = params.get("technician_id");
-        String dept = params.get("department");
-        String note = params.get("note");
 
         try {
-            incidentService.reassignTicketAsManager(account, tokenId, techId, dept, note);
-            Map<String, Object> res = new HashMap<>();
-            res.put("success", true);
-            sendJsonResponse(exchange, 200, res);
+            incidentService.reassignTicketAsManager(
+                    account,
+                    params.get("token_id"),
+                    params.get("technician_id"),
+                    params.get("department"),
+                    params.get("note"));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
         } catch (IllegalArgumentException e) {
             sendError(exchange, 400, e.getMessage());
         } catch (Exception e) {
@@ -311,15 +355,20 @@ public final class WebServer {
     }
 
     private void handleTicketUpdates(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null) {
+            sendError(exchange, 401, "Not authenticated.");
+            return;
+        }
         Map<String, String> query = parseQueryParams(exchange.getRequestURI().getRawQuery());
-        String token = query.get("token");
-        if (token == null || token.trim().isEmpty()) {
-            sendError(exchange, 400, "token parameter is required.");
+        String tokenId = query.get("token_id");
+        if (tokenId == null || tokenId.trim().isEmpty()) {
+            sendError(exchange, 400, "token_id parameter is required.");
             return;
         }
         try {
-            List<Map<String, Object>> list = incidentService.getTicketUpdates(token.trim());
-            sendJsonResponse(exchange, 200, list);
+            List<Map<String, Object>> updates = incidentService.getTicketUpdates(account, tokenId);
+            sendJsonResponse(exchange, 200, updates);
         } catch (Exception e) {
             sendError(exchange, 500, e.getMessage());
         }
@@ -328,10 +377,9 @@ public final class WebServer {
     private void handleActivity(HttpExchange exchange) throws IOException {
         UserAccount account = SessionManager.getAccountFromExchange(exchange);
         if (account == null) {
-            sendError(exchange, 401, "Not logged in.");
+            sendError(exchange, 401, "Not authenticated.");
             return;
         }
-
         try {
             List<Map<String, Object>> list;
             if (account.getRole() == Role.USER) {
@@ -348,6 +396,11 @@ public final class WebServer {
     }
 
     private void handleTechnicians(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null) {
+            sendError(exchange, 401, "Not authenticated.");
+            return;
+        }
         try {
             List<Map<String, String>> list = incidentService.getTechnicianDirectory();
             sendJsonResponse(exchange, 200, list);
@@ -363,6 +416,142 @@ public final class WebServer {
         sendJsonResponse(exchange, 200, map);
     }
 
+    private void handlePriorityScore(HttpExchange exchange) throws IOException {
+        Map<String, String> query = parseQueryParams(exchange.getRequestURI().getRawQuery());
+        String issueType = query.getOrDefault("issue_type", "");
+        String description = query.getOrDefault("description", "");
+        String designation = query.getOrDefault("designation", "");
+        String level = incidentService.calculatePriorityLevel(issueType, description, designation);
+        int score = incidentService.calculatePriorityScore(issueType, description, designation);
+        Map<String, Object> result = new HashMap<>();
+        result.put("priority_level", level);
+        result.put("priority_score", score);
+        sendJsonResponse(exchange, 200, result);
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin endpoints
+    // -------------------------------------------------------------------------
+    private void handleAdminStats(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Admin access required.");
+            return;
+        }
+        try {
+            Map<String, Object> stats = incidentService.adminGetStats();
+            sendJsonResponse(exchange, 200, stats);
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminUsers(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Admin access required.");
+            return;
+        }
+        try {
+            List<Map<String, Object>> users = incidentService.adminGetAllUsers();
+            sendJsonResponse(exchange, 200, users);
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminSetRole(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Admin access required.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
+            return;
+        }
+        String body = readRequestBody(exchange);
+        Map<String, String> params = JsonUtil.parseSimpleJson(body);
+
+        try {
+            incidentService.adminSetUserRole(account, params.get("username"), params.get("role"));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
+        } catch (IllegalArgumentException e) {
+            sendError(exchange, 400, e.getMessage());
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminCloseTicket(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Admin access required.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
+            return;
+        }
+        String body = readRequestBody(exchange);
+        Map<String, String> params = JsonUtil.parseSimpleJson(body);
+
+        try {
+            incidentService.adminCloseTicket(account, params.get("token_id"), params.get("note"));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
+        } catch (IllegalArgumentException e) {
+            sendError(exchange, 400, e.getMessage());
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminReopenTicket(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Admin access required.");
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "Method Not Allowed", "text/plain");
+            return;
+        }
+        String body = readRequestBody(exchange);
+        Map<String, String> params = JsonUtil.parseSimpleJson(body);
+
+        try {
+            incidentService.adminReopenTicket(account, params.get("token_id"), params.get("note"));
+            Map<String, Object> ok = new HashMap<>();
+            ok.put("success", true);
+            sendJsonResponse(exchange, 200, ok);
+        } catch (IllegalArgumentException e) {
+            sendError(exchange, 400, e.getMessage());
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    private void handleAdminAllTickets(HttpExchange exchange) throws IOException {
+        UserAccount account = SessionManager.getAccountFromExchange(exchange);
+        if (account == null || !account.getRole().isAdminOrManager()) {
+            sendError(exchange, 403, "Admin access required.");
+            return;
+        }
+        try {
+            List<Map<String, Object>> tickets = incidentService.getAllTickets();
+            sendJsonResponse(exchange, 200, tickets);
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
     private static Map<String, Object> mapUser(UserAccount acc) {
         Map<String, Object> u = new HashMap<>();
         u.put("username", acc.getUsername());
@@ -390,7 +579,7 @@ public final class WebServer {
     private static String readRequestBody(HttpExchange exchange) throws IOException {
         try (InputStream is = exchange.getRequestBody();
              ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-            byte[] buf = new byte[1024];
+            byte[] buf = new byte[4096];
             int r;
             while ((r = is.read(buf)) != -1) {
                 bos.write(buf, 0, r);
@@ -429,6 +618,7 @@ public final class WebServer {
     private static void sendResponse(HttpExchange exchange, int status, String body, String contentType) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", contentType);
+        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);

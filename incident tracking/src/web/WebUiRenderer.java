@@ -1095,7 +1095,7 @@ public final class WebUiRenderer {
             + "      timeline.innerHTML = '<p>Loading timeline updates...</p>';\n"
             + "      openModal('updatesModal');\n"
             + "      try {\n"
-            + "        const res = await fetch('/api/ticket-updates?token=' + encodeURIComponent(tokenId));\n"
+            + "        const res = await fetch('/api/ticket-updates?token_id=' + encodeURIComponent(tokenId));\n"
             + "        const updates = await res.json();\n"
             + "        if (!updates || updates.length === 0) {\n"
             + "          timeline.innerHTML = '<p style=\"color:var(--text-muted);\">No updates found for this ticket.</p>';\n"

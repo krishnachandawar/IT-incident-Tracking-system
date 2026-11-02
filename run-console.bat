@@ -1,6 +1,9 @@
 @echo off
 setlocal
 title IT Incident Tracking System (Console)
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
+)
 echo ====================================================================
 echo    Starting IT Incident Tracking System (Console Mode)
 echo ====================================================================

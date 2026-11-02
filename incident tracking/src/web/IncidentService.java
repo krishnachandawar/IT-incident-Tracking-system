@@ -24,8 +24,90 @@ public final class IncidentService {
         "Backup and recovery", "Permissions", "Other"
     };
 
-    public String createTicket(UserAccount user, String issueType, String description)
-            throws SQLException {
+    // -------------------------------------------------------------------------
+    // Priority calculation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Determines the priority level label ("Critical", "High", "Medium", "Low")
+     * for a ticket based on issue type, description keywords, and requester
+     * designation.
+     */
+    public String calculatePriorityLevel(String issueType, String description, String designation) {
+        String type = normalize(issueType);
+        String desc = normalize(description);
+        String desig = normalize(designation);
+
+        // --- Critical ---
+        if (type.contains("security")
+                || desc.contains("data loss")
+                || desc.contains("data corruption")
+                || desc.contains("system down")
+                || desc.contains("production down")) {
+            return "Critical";
+        }
+
+        // --- Designation forces at-minimum High ---
+        boolean seniorDesignation = desig.contains("ceo") || desig.contains("cto")
+                || desig.contains("vp") || desig.contains("director")
+                || desig.contains("head");
+
+        // --- High by issue type ---
+        if (type.contains("hardware")
+                || type.contains("backup and recovery")
+                || type.contains("vpn access")) {
+            return "High";
+        }
+
+        // --- High by designation rank (SDE1/SDE2 = high, CxO/VP/Director also caught above) ---
+        int sdeLevel = parseSdeLevel(desig);
+        if (sdeLevel == 1 || sdeLevel == 2) {
+            return "High";
+        }
+
+        if (seniorDesignation) {
+            return "High";
+        }
+
+        // --- Medium ---
+        if (type.contains("network connectivity")
+                || type.contains("database connection")
+                || type.contains("company codebase")
+                || type.contains("performance")) {
+            return "Medium";
+        }
+
+        // --- Low: everything else ---
+        return "Low";
+    }
+
+    /**
+     * Numeric priority score used for secondary sorting within getOpenTickets.
+     * Not the canonical priority label — use calculatePriorityLevel for that.
+     */
+    public int calculatePriorityScore(String issueType, String description, String designation) {
+        int severity = getIssueSeverity(issueType, description);
+        int rank = getDesignationRank(designation);
+        return severity * 60 + rank * 40;
+    }
+
+    // -------------------------------------------------------------------------
+    // Ticket creation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Creates a new ticket. Priority level is auto-computed unless
+     * {@code priorityOverride} is non-null (must be one of "Critical", "High",
+     * "Medium", "Low").
+     *
+     * @param user             the logged-in user
+     * @param issueType        one of the recognised issue type strings
+     * @param description      free-text problem description
+     * @param priorityOverride if non-null, overrides the computed priority level
+     * @return the new token ID
+     */
+    public String createTicket(UserAccount user, String issueType, String description,
+            String priorityOverride) throws SQLException {
         if (user == null) {
             throw new IllegalArgumentException("User must be logged in.");
         }
@@ -36,14 +118,29 @@ public final class IncidentService {
             throw new IllegalArgumentException("Description must not be empty.");
         }
 
-        String tokenId = "TKN-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
         String validIssueType = issueType.trim();
         String validDescription = description.trim();
 
+        String priority;
+        if (priorityOverride != null && !priorityOverride.trim().isEmpty()) {
+            String po = priorityOverride.trim();
+            if (!po.equals("Critical") && !po.equals("High")
+                    && !po.equals("Medium") && !po.equals("Low")) {
+                throw new IllegalArgumentException(
+                        "Priority override must be Critical, High, Medium, or Low.");
+            }
+            priority = po;
+        } else {
+            priority = calculatePriorityLevel(validIssueType, validDescription,
+                    user.getDesignation());
+        }
+
+        String tokenId = "TKN-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
+
         String insertTicket = "INSERT INTO tickets "
                 + "(token_id, requester_username, employee_id, user_department, designation, "
-                + "issue_type, description, issue_status) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, 'Open')";
+                + "issue_type, description, priority_level, issue_status) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Open')";
         String insertUpdate = "INSERT INTO ticket_updates "
                 + "(token_id, actor_username, actor_role, status, estimated_minutes, message) "
                 + "VALUES (?, ?, 'USER', 'Open', NULL, 'Issue registered')";
@@ -60,6 +157,7 @@ public final class IncidentService {
                 ticketStmt.setString(5, user.getDesignation());
                 ticketStmt.setString(6, validIssueType);
                 ticketStmt.setString(7, validDescription);
+                ticketStmt.setString(8, priority);
                 ticketStmt.executeUpdate();
 
                 updateStmt.setString(1, tokenId);
@@ -80,10 +178,15 @@ public final class IncidentService {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Ticket queries
+    // -------------------------------------------------------------------------
+
     public List<Map<String, Object>> getTicketsForUser(String username) throws SQLException {
         String sql = "SELECT token_id, requester_username, employee_id, user_department, "
-                + "designation, issue_type, description, issue_status, technician_id, "
-                + "technician_department, estimated_minutes, created_at, updated_at "
+                + "designation, issue_type, description, priority_level, issue_status, technician_id, "
+                + "technician_department, estimated_minutes, reissued_count, closed_by, "
+                + "created_at, updated_at "
                 + "FROM tickets WHERE requester_username = ? ORDER BY created_at DESC";
         try (Connection connection = DatabaseConnections.openRoleConnection(Role.USER);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -101,8 +204,9 @@ public final class IncidentService {
     public List<Map<String, Object>> getOpenTickets(String issueTypeFilter) throws SQLException {
         StringBuilder sql = new StringBuilder(
                 "SELECT token_id, requester_username, employee_id, user_department, designation, "
-                + "issue_type, description, issue_status, technician_id, technician_department, "
-                + "estimated_minutes, created_at, updated_at FROM tickets WHERE issue_status = 'Open'");
+                + "issue_type, description, priority_level, issue_status, technician_id, "
+                + "technician_department, estimated_minutes, reissued_count, closed_by, "
+                + "created_at, updated_at FROM tickets WHERE issue_status = 'Open'");
         if (issueTypeFilter != null && !issueTypeFilter.trim().isEmpty()
                 && !"ALL".equalsIgnoreCase(issueTypeFilter.trim())) {
             sql.append(" AND issue_type = ?");
@@ -135,10 +239,49 @@ public final class IncidentService {
         }
     }
 
-    public List<Map<String, Object>> getAssignedTickets(String technicianEmployeeId) throws SQLException {
+    /**
+     * Returns all Open tickets for technicians to claim, sorted by priority
+     * level (Critical → High → Medium → Low) then by creation time ascending.
+     */
+    public List<Map<String, Object>> getOpenTicketsForTechnician() throws SQLException {
         String sql = "SELECT token_id, requester_username, employee_id, user_department, "
-                + "designation, issue_type, description, issue_status, technician_id, "
-                + "technician_department, estimated_minutes, created_at, updated_at "
+                + "designation, issue_type, description, priority_level, issue_status, "
+                + "technician_id, technician_department, estimated_minutes, reissued_count, "
+                + "closed_by, created_at, updated_at "
+                + "FROM tickets WHERE issue_status = 'Open' ORDER BY created_at ASC";
+
+        try (Connection connection = DatabaseConnections.openRoleConnection(Role.TECHNICIAN);
+             PreparedStatement stmt = connection.prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+            List<Map<String, Object>> list = new ArrayList<>();
+            while (rs.next()) {
+                list.add(mapTicketRow(rs));
+            }
+            // Sort: Critical(0) > High(1) > Medium(2) > Low(3), then created_at ASC
+            list.sort((a, b) -> {
+                int pa = priorityOrdinal((String) a.get("priority_level"));
+                int pb = priorityOrdinal((String) b.get("priority_level"));
+                if (pa != pb) {
+                    return Integer.compare(pa, pb); // lower ordinal = higher priority
+                }
+                // created_at as String — ISO-format strings sort lexicographically correctly
+                String ca = (String) a.get("created_at");
+                String cb = (String) b.get("created_at");
+                if (ca == null && cb == null) return 0;
+                if (ca == null) return 1;
+                if (cb == null) return -1;
+                return ca.compareTo(cb);
+            });
+            return list;
+        }
+    }
+
+    public List<Map<String, Object>> getAssignedTickets(String technicianEmployeeId)
+            throws SQLException {
+        String sql = "SELECT token_id, requester_username, employee_id, user_department, "
+                + "designation, issue_type, description, priority_level, issue_status, "
+                + "technician_id, technician_department, estimated_minutes, reissued_count, "
+                + "closed_by, created_at, updated_at "
                 + "FROM tickets WHERE technician_id = ? AND issue_status <> 'Resolved' "
                 + "ORDER BY created_at ASC";
         try (Connection connection = DatabaseConnections.openRoleConnection(Role.TECHNICIAN);
@@ -156,8 +299,9 @@ public final class IncidentService {
 
     public List<Map<String, Object>> getUnresolvedTickets() throws SQLException {
         String sql = "SELECT token_id, requester_username, employee_id, user_department, "
-                + "designation, issue_type, description, issue_status, technician_id, "
-                + "technician_department, estimated_minutes, created_at, updated_at "
+                + "designation, issue_type, description, priority_level, issue_status, "
+                + "technician_id, technician_department, estimated_minutes, reissued_count, "
+                + "closed_by, created_at, updated_at "
                 + "FROM tickets WHERE issue_status <> 'Resolved' ORDER BY created_at ASC";
         try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER);
              Statement stmt = connection.createStatement();
@@ -172,8 +316,9 @@ public final class IncidentService {
 
     public List<Map<String, Object>> getAllTickets() throws SQLException {
         String sql = "SELECT token_id, requester_username, employee_id, user_department, "
-                + "designation, issue_type, description, issue_status, technician_id, "
-                + "technician_department, estimated_minutes, created_at, updated_at "
+                + "designation, issue_type, description, priority_level, issue_status, "
+                + "technician_id, technician_department, estimated_minutes, reissued_count, "
+                + "closed_by, created_at, updated_at "
                 + "FROM tickets ORDER BY created_at DESC";
         try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER);
              Statement stmt = connection.createStatement();
@@ -186,13 +331,26 @@ public final class IncidentService {
         }
     }
 
-    public List<Map<String, Object>> getTicketUpdates(String tokenId) throws SQLException {
-        String sql = "SELECT update_id, token_id, actor_username, actor_role, status, "
-                + "estimated_minutes, message, created_at FROM ticket_updates "
-                + "WHERE token_id = ? ORDER BY update_id ASC";
+    public List<Map<String, Object>> getTicketUpdates(UserAccount viewer, String tokenId)
+            throws SQLException {
+        if (viewer == null) {
+            throw new IllegalArgumentException("User must be logged in.");
+        }
+        StringBuilder sql = new StringBuilder(
+                "SELECT u.update_id, u.token_id, u.actor_username, u.actor_role, u.status, "
+                + "u.estimated_minutes, u.message, u.created_at FROM ticket_updates u "
+                + "JOIN tickets t ON t.token_id = u.token_id WHERE u.token_id = ?");
+        if (viewer.getRole() == Role.USER) {
+            sql.append(" AND t.requester_username = ?");
+        }
+        sql.append(" ORDER BY u.update_id ASC");
         try (Connection connection = DatabaseConnections.openDefaultConnection();
-             PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, tokenId);
+             PreparedStatement stmt = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            stmt.setString(parameter++, tokenId);
+            if (viewer.getRole() == Role.USER) {
+                stmt.setString(parameter, viewer.getUsername());
+            }
             try (ResultSet rs = stmt.executeQuery()) {
                 List<Map<String, Object>> list = new ArrayList<>();
                 while (rs.next()) {
@@ -211,6 +369,10 @@ public final class IncidentService {
             }
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Technician actions
+    // -------------------------------------------------------------------------
 
     public void claimTicket(UserAccount technician, String tokenId) throws SQLException {
         if (technician == null || technician.getRole() != Role.TECHNICIAN) {
@@ -285,7 +447,8 @@ public final class IncidentService {
                                 "Ticket not found, resolved, or not assigned to you: " + tokenId);
                     }
                 }
-                recordTicketUpdate(connection, tokenId, technician, status, estimatedMinutes, note.trim());
+                recordTicketUpdate(connection, tokenId, technician, status, estimatedMinutes,
+                        note.trim());
                 recordActivity(connection, tokenId, technician, "STATUS_UPDATED", status,
                         estimatedMinutes, note.trim());
                 connection.commit();
@@ -298,14 +461,18 @@ public final class IncidentService {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Manager actions
+    // -------------------------------------------------------------------------
+
     public void updateTicketAsManager(
             UserAccount manager,
             String tokenId,
             String status,
             int estimatedMinutes,
             String note) throws SQLException {
-        if (manager == null || manager.getRole() != Role.MANAGER) {
-            throw new IllegalArgumentException("Only managers can perform this action.");
+        if (manager == null || !manager.getRole().isAdminOrManager()) {
+            throw new IllegalArgumentException("Only managers or admins can perform this action.");
         }
         if (note == null || note.trim().isEmpty()) {
             throw new IllegalArgumentException("Manager update note must not be empty.");
@@ -359,8 +526,8 @@ public final class IncidentService {
             String newTechnicianId,
             String newDepartment,
             String note) throws SQLException {
-        if (manager == null || manager.getRole() != Role.MANAGER) {
-            throw new IllegalArgumentException("Only managers can reassign tickets.");
+        if (manager == null || !manager.getRole().isAdminOrManager()) {
+            throw new IllegalArgumentException("Only managers or admins can reassign tickets.");
         }
         if (newTechnicianId == null || newTechnicianId.trim().isEmpty()) {
             throw new IllegalArgumentException("Technician ID must not be empty.");
@@ -409,7 +576,8 @@ public final class IncidentService {
                 String message = "Reassigned to technician " + validTechId
                         + " (" + validDept + "). " + validNote;
                 recordTicketUpdate(connection, tokenId, manager, "Allocated", null, message);
-                recordActivity(connection, tokenId, manager, "ISSUE_REASSIGNED", "Allocated", null, message);
+                recordActivity(connection, tokenId, manager, "ISSUE_REASSIGNED", "Allocated", null,
+                        message);
                 connection.commit();
             } catch (SQLException | RuntimeException e) {
                 connection.rollback();
@@ -419,6 +587,278 @@ public final class IncidentService {
             }
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Admin actions
+    // -------------------------------------------------------------------------
+
+    /**
+     * Force-closes a ticket as an admin or manager, bypassing the normal
+     * Pending Manager Review workflow.
+     */
+    public void adminCloseTicket(UserAccount admin, String tokenId, String note)
+            throws SQLException {
+        if (admin == null || !admin.getRole().isAdminOrManager()) {
+            throw new IllegalArgumentException("Only admins or managers can force-close tickets.");
+        }
+        if (tokenId == null || tokenId.trim().isEmpty()) {
+            throw new IllegalArgumentException("Token ID must not be empty.");
+        }
+
+        String validNote = (note == null) ? "" : note.trim();
+
+        String updateSql = "UPDATE tickets SET issue_status = 'Resolved', "
+                + "closed_by = ?, updated_at = CURRENT_TIMESTAMP "
+                + "WHERE token_id = ? AND issue_status <> 'Resolved'";
+        String auditSql = "INSERT INTO admin_audit_log "
+                + "(admin_username, action, token_id, target_username, details) "
+                + "VALUES (?, 'CLOSE_TICKET', ?, NULL, ?)";
+
+        try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER)) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement stmt = connection.prepareStatement(updateSql)) {
+                    stmt.setString(1, admin.getUsername());
+                    stmt.setString(2, tokenId);
+                    int rows = stmt.executeUpdate();
+                    if (rows != 1) {
+                        throw new IllegalArgumentException(
+                                "Ticket not found or already resolved: " + tokenId);
+                    }
+                }
+                recordTicketUpdate(connection, tokenId, admin, "Resolved", null, validNote);
+                recordActivity(connection, tokenId, admin, "ADMIN_CLOSED", "Resolved", null,
+                        "Admin force-closed ticket. " + validNote);
+                try (PreparedStatement auditStmt = connection.prepareStatement(auditSql)) {
+                    auditStmt.setString(1, admin.getUsername());
+                    auditStmt.setString(2, tokenId);
+                    auditStmt.setString(3, "Force-closed ticket. " + validNote);
+                    auditStmt.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(previousAutoCommit);
+            }
+        }
+    }
+
+    /**
+     * Reopens a resolved ticket as an admin or manager, resetting it to Open
+     * and clearing technician assignment.
+     */
+    public void adminReopenTicket(UserAccount admin, String tokenId, String note)
+            throws SQLException {
+        if (admin == null || !admin.getRole().isAdminOrManager()) {
+            throw new IllegalArgumentException("Only admins or managers can reopen tickets.");
+        }
+        if (tokenId == null || tokenId.trim().isEmpty()) {
+            throw new IllegalArgumentException("Token ID must not be empty.");
+        }
+
+        String validNote = (note == null) ? "" : note.trim();
+        String updateMessage = "Ticket reopened/reissued by admin: " + validNote;
+
+        String updateSql = "UPDATE tickets SET issue_status = 'Open', "
+                + "technician_id = NULL, technician_department = NULL, "
+                + "estimated_minutes = NULL, closed_by = NULL, "
+                + "reissued_count = reissued_count + 1, "
+                + "updated_at = CURRENT_TIMESTAMP "
+                + "WHERE token_id = ? AND issue_status = 'Resolved'";
+        String auditSql = "INSERT INTO admin_audit_log "
+                + "(admin_username, action, token_id, target_username, details) "
+                + "VALUES (?, 'REOPEN_TICKET', ?, NULL, ?)";
+
+        try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER)) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement stmt = connection.prepareStatement(updateSql)) {
+                    stmt.setString(1, tokenId);
+                    int rows = stmt.executeUpdate();
+                    if (rows != 1) {
+                        throw new IllegalArgumentException(
+                                "Ticket not found or not in Resolved status: " + tokenId);
+                    }
+                }
+                recordTicketUpdate(connection, tokenId, admin, "Open", null, updateMessage);
+                recordActivity(connection, tokenId, admin, "ADMIN_REOPENED", "Open", null,
+                        updateMessage);
+                try (PreparedStatement auditStmt = connection.prepareStatement(auditSql)) {
+                    auditStmt.setString(1, admin.getUsername());
+                    auditStmt.setString(2, tokenId);
+                    auditStmt.setString(3, updateMessage);
+                    auditStmt.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(previousAutoCommit);
+            }
+        }
+    }
+
+    /**
+     * Returns all user accounts ordered by creation date descending.
+     */
+    public List<Map<String, Object>> adminGetAllUsers() throws SQLException {
+        String sql = "SELECT username, employee_id, department, designation, role, created_at "
+                + "FROM app_users ORDER BY created_at DESC";
+        try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER);
+             Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            List<Map<String, Object>> list = new ArrayList<>();
+            while (rs.next()) {
+                Map<String, Object> row = new HashMap<>();
+                row.put("username", rs.getString("username"));
+                row.put("employee_id", rs.getString("employee_id"));
+                row.put("department", rs.getString("department"));
+                row.put("designation", rs.getString("designation"));
+                row.put("role", rs.getString("role"));
+                row.put("created_at", rs.getString("created_at"));
+                list.add(row);
+            }
+            return list;
+        }
+    }
+
+    /**
+     * Changes the role of a user account, logging the action to admin_audit_log.
+     */
+    public void adminSetUserRole(UserAccount admin, String targetUsername, String newRole)
+            throws SQLException {
+        if (admin == null || !admin.getRole().isAdminOrManager()) {
+            throw new IllegalArgumentException("Only admins or managers can change user roles.");
+        }
+        if (targetUsername == null || targetUsername.trim().isEmpty()) {
+            throw new IllegalArgumentException("Target username must not be empty.");
+        }
+        if (newRole == null || newRole.trim().isEmpty()) {
+            throw new IllegalArgumentException("New role must not be empty.");
+        }
+        String validRole = newRole.trim().toUpperCase(Locale.ROOT);
+        if (!validRole.equals("USER") && !validRole.equals("TECHNICIAN")
+                && !validRole.equals("MANAGER") && !validRole.equals("ADMIN")) {
+            throw new IllegalArgumentException(
+                    "Role must be one of USER, TECHNICIAN, MANAGER, ADMIN.");
+        }
+        String validTarget = targetUsername.trim();
+
+        String updateSql = "UPDATE app_users SET role = ? WHERE username = ?";
+        String auditSql = "INSERT INTO admin_audit_log "
+                + "(admin_username, action, token_id, target_username, details) "
+                + "VALUES (?, 'SET_USER_ROLE', NULL, ?, ?)";
+
+        try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER)) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement stmt = connection.prepareStatement(updateSql)) {
+                    stmt.setString(1, validRole);
+                    stmt.setString(2, validTarget);
+                    int rows = stmt.executeUpdate();
+                    if (rows != 1) {
+                        throw new IllegalArgumentException(
+                                "User not found: " + validTarget);
+                    }
+                }
+                try (PreparedStatement auditStmt = connection.prepareStatement(auditSql)) {
+                    auditStmt.setString(1, admin.getUsername());
+                    auditStmt.setString(2, validTarget);
+                    auditStmt.setString(3, "Role changed to " + validRole);
+                    auditStmt.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(previousAutoCommit);
+            }
+        }
+    }
+
+    /**
+     * Returns aggregate statistics about the ticket system.
+     */
+    public Map<String, Object> adminGetStats() throws SQLException {
+        try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER)) {
+            Map<String, Object> stats = new HashMap<>();
+
+            // --- By status ---
+            String byStatusSql = "SELECT issue_status, COUNT(*) AS cnt FROM tickets GROUP BY issue_status";
+            Map<String, Integer> byStatus = new HashMap<>();
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(byStatusSql)) {
+                while (rs.next()) {
+                    byStatus.put(rs.getString("issue_status"), rs.getInt("cnt"));
+                }
+            }
+            stats.put("by_status", byStatus);
+
+            // --- By priority ---
+            String byPrioritySql = "SELECT priority_level, COUNT(*) AS cnt FROM tickets GROUP BY priority_level";
+            Map<String, Integer> byPriority = new HashMap<>();
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(byPrioritySql)) {
+                while (rs.next()) {
+                    byPriority.put(rs.getString("priority_level"), rs.getInt("cnt"));
+                }
+            }
+            stats.put("by_priority", byPriority);
+
+            // --- By issue type ---
+            String byTypeSql = "SELECT issue_type, COUNT(*) AS cnt FROM tickets GROUP BY issue_type";
+            Map<String, Integer> byType = new HashMap<>();
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(byTypeSql)) {
+                while (rs.next()) {
+                    byType.put(rs.getString("issue_type"), rs.getInt("cnt"));
+                }
+            }
+            stats.put("by_issue_type", byType);
+
+            // --- Total open ---
+            String totalOpenSql = "SELECT COUNT(*) AS cnt FROM tickets WHERE issue_status = 'Open'";
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(totalOpenSql)) {
+                stats.put("total_open", rs.next() ? rs.getInt("cnt") : 0);
+            }
+
+            // --- Total resolved today ---
+            String resolvedTodaySql = "SELECT COUNT(*) AS cnt FROM tickets "
+                    + "WHERE issue_status = 'Resolved' AND updated_at >= CURDATE()";
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(resolvedTodaySql)) {
+                stats.put("total_resolved_today", rs.next() ? rs.getInt("cnt") : 0);
+            }
+
+            // --- Total technicians ---
+            String totalTechSql = "SELECT COUNT(*) AS cnt FROM app_users WHERE role = 'TECHNICIAN'";
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(totalTechSql)) {
+                stats.put("total_technicians", rs.next() ? rs.getInt("cnt") : 0);
+            }
+
+            // --- Total users ---
+            String totalUsersSql = "SELECT COUNT(*) AS cnt FROM app_users WHERE role = 'USER'";
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(totalUsersSql)) {
+                stats.put("total_users", rs.next() ? rs.getInt("cnt") : 0);
+            }
+
+            return stats;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Activity logs
+    // -------------------------------------------------------------------------
 
     public List<Map<String, Object>> getUserActivity(String username) throws SQLException {
         String sql = "SELECT activity_id, user_username, token_id, actor_username, actor_role, "
@@ -458,9 +898,14 @@ public final class IncidentService {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Technician directory
+    // -------------------------------------------------------------------------
+
+    /** Returns the technician directory. Accessible to any authenticated user. */
     public List<Map<String, String>> getTechnicianDirectory() throws SQLException {
         String sql = "SELECT employee_id, username, department FROM technician_directory ORDER BY employee_id";
-        try (Connection connection = DatabaseConnections.openRoleConnection(Role.MANAGER);
+        try (Connection connection = DatabaseConnections.openDefaultConnection();
              Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
             List<Map<String, String>> list = new ArrayList<>();
@@ -475,10 +920,18 @@ public final class IncidentService {
         }
     }
 
-    public int calculatePriorityScore(String issueType, String description, String designation) {
-        int severity = getIssueSeverity(issueType, description);
-        int rank = getDesignationRank(designation);
-        return severity * 60 + rank * 40;
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    private int priorityOrdinal(String priorityLevel) {
+        if (priorityLevel == null) return 3;
+        switch (priorityLevel) {
+            case "Critical": return 0;
+            case "High":     return 1;
+            case "Medium":   return 2;
+            default:         return 3; // Low
+        }
     }
 
     private int getIssueSeverity(String issueType, String description) {
@@ -522,6 +975,24 @@ public final class IncidentService {
         return 0;
     }
 
+    /** Returns the numeric SDE level (1–5) or -1 if not an SDE designation. */
+    private int parseSdeLevel(String normalizedDesignation) {
+        int idx = normalizedDesignation.indexOf("sde");
+        if (idx >= 0 && idx + 3 < normalizedDesignation.length()) {
+            char c = normalizedDesignation.charAt(idx + 3);
+            boolean onlyOneDigit = !Character.isDigit(c)
+                    || idx + 4 == normalizedDesignation.length()
+                    || !Character.isDigit(normalizedDesignation.charAt(idx + 4));
+            if (Character.isDigit(c) && onlyOneDigit) {
+                int level = Character.digit(c, 10);
+                if (level >= 1 && level <= 5) {
+                    return level;
+                }
+            }
+        }
+        return -1;
+    }
+
     private String normalize(String val) {
         return val == null ? "" : val.toLowerCase(Locale.ROOT);
     }
@@ -535,10 +1006,13 @@ public final class IncidentService {
         map.put("designation", rs.getString("designation"));
         map.put("issue_type", rs.getString("issue_type"));
         map.put("description", rs.getString("description"));
+        map.put("priority_level", rs.getString("priority_level"));
         map.put("issue_status", rs.getString("issue_status"));
         map.put("technician_id", rs.getString("technician_id"));
         map.put("technician_department", rs.getString("technician_department"));
         map.put("estimated_minutes", rs.getObject("estimated_minutes"));
+        map.put("reissued_count", rs.getInt("reissued_count"));
+        map.put("closed_by", rs.getString("closed_by"));
         map.put("created_at", rs.getString("created_at"));
         map.put("updated_at", rs.getString("updated_at"));
         return map;
@@ -602,7 +1076,8 @@ public final class IncidentService {
                 tokenId, actor, eventType, status, estimatedMinutes, details);
         if (actor.getRole() == Role.TECHNICIAN) {
             insertActivityRow(connection, "technician_activity_log", "technician_username",
-                    actor.getUsername(), tokenId, actor, eventType, status, estimatedMinutes, details);
+                    actor.getUsername(), tokenId, actor, eventType, status, estimatedMinutes,
+                    details);
         }
     }
 

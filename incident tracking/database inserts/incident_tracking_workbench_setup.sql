@@ -7,7 +7,7 @@
 --   2. Create all necessary tables, indexes, and constraints
 --   3. Create the technician_directory view
 --   4. Configure the 'incident_user' service account with password 'Incident@123'
---   5. Seed initial accounts (User, Technician, Manager) with password 'Password1234!'
+--   5. Seed initial accounts (User, Technician, Manager, Admin) with password 'Password1234!'
 --   6. Seed sample tickets, updates, and activity history
 -- ==============================================================================
 
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS app_users (
     employee_id VARCHAR(64) NOT NULL,
     department VARCHAR(120) NOT NULL,
     designation VARCHAR(120) NOT NULL,
-    role ENUM('USER', 'TECHNICIAN', 'MANAGER') NOT NULL DEFAULT 'USER',
+    role ENUM('USER', 'TECHNICIAN', 'MANAGER', 'ADMIN') NOT NULL DEFAULT 'USER',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (username),
     UNIQUE KEY uq_app_users_employee_id (employee_id)
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     designation VARCHAR(120) NOT NULL,
     issue_type VARCHAR(100) NOT NULL,
     description TEXT NOT NULL,
+    priority_level ENUM('Critical', 'High', 'Medium', 'Low') NOT NULL DEFAULT 'Medium',
     issue_status ENUM(
         'Open',
         'Allocated',
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS tickets (
     technician_id VARCHAR(64) NULL,
     technician_department VARCHAR(120) NULL,
     estimated_minutes INT UNSIGNED NULL,
+    reissued_count INT UNSIGNED NOT NULL DEFAULT 0,
+    closed_by VARCHAR(64) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         ON UPDATE CURRENT_TIMESTAMP,
@@ -73,14 +76,15 @@ CREATE TABLE IF NOT EXISTS ticket_updates (
     update_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     token_id VARCHAR(40) NOT NULL,
     actor_username VARCHAR(64) NOT NULL,
-    actor_role ENUM('USER', 'TECHNICIAN', 'MANAGER') NOT NULL,
+    actor_role ENUM('USER', 'TECHNICIAN', 'MANAGER', 'ADMIN') NOT NULL,
     status ENUM(
         'Open',
         'Allocated',
         'In Progress',
         'Waiting',
         'Pending Manager Review',
-        'Resolved'
+        'Resolved',
+        'Reopened'
     ) NOT NULL,
     estimated_minutes INT UNSIGNED NULL,
     message TEXT NOT NULL,
@@ -99,7 +103,7 @@ CREATE TABLE IF NOT EXISTS user_activity_log (
     user_username VARCHAR(64) NOT NULL,
     token_id VARCHAR(40) NULL,
     actor_username VARCHAR(64) NOT NULL,
-    actor_role ENUM('USER', 'TECHNICIAN', 'MANAGER') NOT NULL,
+    actor_role ENUM('USER', 'TECHNICIAN', 'MANAGER', 'ADMIN') NOT NULL,
     event_type VARCHAR(64) NOT NULL,
     status ENUM(
         'Open',
@@ -107,7 +111,8 @@ CREATE TABLE IF NOT EXISTS user_activity_log (
         'In Progress',
         'Waiting',
         'Pending Manager Review',
-        'Resolved'
+        'Resolved',
+        'Reopened'
     ) NULL,
     estimated_minutes INT UNSIGNED NULL,
     details TEXT NOT NULL,
@@ -133,7 +138,8 @@ CREATE TABLE IF NOT EXISTS technician_activity_log (
         'In Progress',
         'Waiting',
         'Pending Manager Review',
-        'Resolved'
+        'Resolved',
+        'Reopened'
     ) NULL,
     estimated_minutes INT UNSIGNED NULL,
     details TEXT NOT NULL,
@@ -151,7 +157,7 @@ CREATE TABLE IF NOT EXISTS manager_activity_log (
     manager_scope VARCHAR(8) NOT NULL DEFAULT 'ALL',
     token_id VARCHAR(40) NULL,
     actor_username VARCHAR(64) NOT NULL,
-    actor_role ENUM('USER', 'TECHNICIAN', 'MANAGER') NOT NULL,
+    actor_role ENUM('USER', 'TECHNICIAN', 'MANAGER', 'ADMIN') NOT NULL,
     event_type VARCHAR(64) NOT NULL,
     status ENUM(
         'Open',
@@ -159,7 +165,8 @@ CREATE TABLE IF NOT EXISTS manager_activity_log (
         'In Progress',
         'Waiting',
         'Pending Manager Review',
-        'Resolved'
+        'Resolved',
+        'Reopened'
     ) NULL,
     estimated_minutes INT UNSIGNED NULL,
     details TEXT NOT NULL,
@@ -170,7 +177,23 @@ CREATE TABLE IF NOT EXISTS manager_activity_log (
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------------------------
--- 7. View: technician_directory
+-- 7. Table: admin_audit_log
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    audit_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    admin_username VARCHAR(64) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    token_id VARCHAR(40) NULL,
+    target_username VARCHAR(64) NULL,
+    details TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (audit_id),
+    KEY ix_admin_audit_admin (admin_username, audit_id),
+    KEY ix_admin_audit_token (token_id)
+) ENGINE=InnoDB;
+
+-- ------------------------------------------------------------------------------
+-- 8. View: technician_directory
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE VIEW technician_directory AS
     SELECT employee_id, username, department
@@ -178,7 +201,7 @@ CREATE OR REPLACE VIEW technician_directory AS
     WHERE role = 'TECHNICIAN';
 
 -- ------------------------------------------------------------------------------
--- 8. User creation & privileges for MySQL Workbench & JDBC
+-- 9. User creation & privileges for MySQL Workbench & JDBC
 -- ------------------------------------------------------------------------------
 CREATE USER IF NOT EXISTS 'incident_user'@'localhost' IDENTIFIED BY 'Incident@123';
 ALTER USER 'incident_user'@'localhost' IDENTIFIED BY 'Incident@123';
@@ -191,13 +214,14 @@ GRANT ALL PRIVILEGES ON incident_tracking.* TO 'incident_user'@'%';
 FLUSH PRIVILEGES;
 
 -- ------------------------------------------------------------------------------
--- 9. Seed default users (Password for all is 'Password1234!')
+-- 10. Seed default users (Password for all is 'Password1234!')
 -- ------------------------------------------------------------------------------
 INSERT INTO app_users (username, password_salt, password_hash, employee_id, department, designation, role)
 VALUES
     ('alice', 'mrqKc4N1ZzP28lSlY/FeGw==', '5AYhPMO5kHrDSXpS7CdDvo+GcNPxC3FiCVGTrCI4zfA=', 'EMP101', 'Engineering', 'SDE2', 'USER'),
     ('bob_tech', 'lpLzlJv2utTkqJomVEie0A==', '/6oRePVue9LGr6PgC5SEPSyhoOED6wv4wioj+HHYHZw=', 'TECH201', 'IT Support', 'Senior Technician', 'TECHNICIAN'),
-    ('carol_mgr', 'rSSWdZHEU54AUP4i+4lYKw==', 'x7EOvPtAHzDzAc38dHpeie0O/CdU9+qpcOqomU0q0J4=', 'MGR301', 'IT Operations', 'IT Manager', 'MANAGER')
+    ('carol_mgr', 'rSSWdZHEU54AUP4i+4lYKw==', 'x7EOvPtAHzDzAc38dHpeie0O/CdU9+qpcOqomU0q0J4=', 'MGR301', 'IT Operations', 'IT Manager', 'MANAGER'),
+    ('admin', 'mrqKc4N1ZzP28lSlY/FeGw==', '5AYhPMO5kHrDSXpS7CdDvo+GcNPxC3FiCVGTrCI4zfA=', 'ADM001', 'IT Administration', 'System Administrator', 'ADMIN')
 ON DUPLICATE KEY UPDATE department = VALUES(department), designation = VALUES(designation), role = VALUES(role);
 
 -- Seed Registration Activity
