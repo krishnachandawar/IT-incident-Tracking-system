@@ -11,4 +11,4 @@ A full-lifecycle IT Incident Tracking System backed by MySQL. Now supports both 
    - Your browser will automatically open `http://localhost:8080/`.
 
 See [WORKBENCH_AND_BROWSER_SETUP.md](WORKBENCH_AND_BROWSER_SETUP.md) for full setup instructions, seed logins, JDBC configurations, and query examples.
-See [DOCUMENTATION.md](DOCUMENTATION.md) for architecture, workflows, and role permissions.
+See [DOCUMENTATION.md](DOCUMENTATION.md) for installation, MySQL setup, role-specific usage, troubleshooting, and the incident workflow diagram.
