@@ -27,6 +27,15 @@ public final class IncidentPortal {
     }
 
     private void run() {
+        if (!DatabaseConnections.testConnection()) {
+            System.out.println("Cannot connect to MySQL.");
+            System.out.println("JDBC URL: " + DatabaseConnections.getEffectiveUrl());
+            System.out.println("DB user:  " + DatabaseConnections.resolveUsername("AUTH"));
+            System.out.println("Driver:   " + DatabaseConnections.getDriverStatus());
+            System.out.println("Open MySQL Workbench, run "
+                    + "database inserts/incident_tracking_workbench_setup.sql, "
+                    + "then run access.MysqlConnectionTest.");
+        }
         try (Scanner scanner = new Scanner(System.in)) {
             while (true) {
                 System.out.println("\nIncident tracking portal");

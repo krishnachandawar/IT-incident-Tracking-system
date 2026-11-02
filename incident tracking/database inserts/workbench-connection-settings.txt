@@ -1,0 +1,22 @@
+MySQL Workbench connection fields for this project
+==================================================
+
+Connection Name:  Incident Tracking (local)
+Connection Method: Standard (TCP/IP)
+
+Parameters tab
+  Hostname:        127.0.0.1
+  Port:            3306
+  Username:        root          (first-time setup, to run the SQL script)
+                   incident_user (day-to-day browsing of tables)
+  Password:        Store in Vault
+                   root password = the password you set when installing MySQL
+                   incident_user password = Incident@123
+  Default Schema:  incident_tracking
+
+SSL tab
+  Use SSL:         No  (local development only)
+
+After Test Connection succeeds, click OK.
+Then open File > Open SQL Script and run:
+  incident tracking/database inserts/incident_tracking_workbench_setup.sql

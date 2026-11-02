@@ -7,7 +7,7 @@ public final class UserAccount {
     private final String designation;
     private final Role role;
 
-    UserAccount(
+    public UserAccount(
             String username,
             String employeeId,
             String department,
